@@ -3,7 +3,7 @@ from regular_array import RegularArray
 import numpy as np, pandas as pd, xarray as xr
 import logging, beautifullogger, tqdm.auto as tqdm
 import pickle, yaml
-from common import load_pickle, retrieve_sessions, get_session_source_path, get_session_storage_path, source_base, target_base, get_param
+from common import load_pickle, retrieve_sessions, get_session_source_path, get_session_storage_path, source_base, target_base, get_param, retrieve_tasks
 logger = logging.getLogger(__name__)
 beautifullogger.setup()
 xr.set_options(display_expand_coords=True, display_max_rows=100)
@@ -40,18 +40,18 @@ def computation(d: xr.Dataset, s: Path):
 # Run
 # ============================================================================ #
 
-stop_on_error=True
+stop_on_error=False
 pd.Series.buffered_errors=not stop_on_error
 write_output=True
 
 
-def requires(s):
-    return [get_session_storage_path(s)/"metadata.pkl"]
+def requires(session):
+    return [get_session_storage_path(session)/"metadata.pkl"]
 
-def generates(s) -> Path:
-    return get_session_storage_path(s)/"song/song_filtered.pkl"
+def generates(session) -> Path:
+    return get_session_storage_path(session)/"song/song_filtered.pkl"
 
-sessions = retrieve_sessions(requires, generates, recompute_existing=True, n_per_subject=2)
+sessions = retrieve_tasks(requires, generates, recompute_existing=True, n_per_subject=None)
 
 errors = []
 

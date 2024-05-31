@@ -4,11 +4,12 @@ from pathlib import Path
 import numpy as np, pandas as pd, xarray as xr
 import logging, tqdm.auto as tqdm
 import pickle, yaml
-import functools
+import functools, inspect
 
 logger = logging.getLogger(__name__)
 
 source_base = Path("/media/filer2/T4b/Carmen/LMANX_correlations_project/LMANX_behavior_data/BirdData/")
+# target_base = Path("~/Documents/Data/Carmen/LMANX_correlations_project")
 target_base = Path("/media/filer2/T4b/Julien/Data/Carmen/LMANX_correlations_project")
 
 @functools.cache
@@ -48,33 +49,84 @@ def load_pickle(p: Path):
     with p.open("rb") as f:
         return pickle.load(f)
     
+def save_result_decorator(func):
+    saved_path = Path(f"./data/{func.__name__}.pkl")
+    def new_f(*args, **kwargs):
+        if saved_path.exists():
+            with saved_path.open("rb") as f:
+                res = pickle.load(f)
+        else:
+            res = func(*args, **kwargs)
+            with saved_path.open("wb") as f:
+                pickle.dump(res,f)
+        return res
+    return new_f
+
+
+
+@save_result_decorator
 def all_sessions(progress=True):
     res=pd.DataFrame()
     files = [p.relative_to(source_base).parent for subject in tqdm.tqdm(list(source_base.iterdir()), disable= not progress) for p in subject.glob("**/Sessions/**/song")]
-    res["session"] = [str(f) for f in files]
+    res["session"] = files
     res["subject"] = [s.parents[-2].stem for s  in files]
     return res
 
+@save_result_decorator
 def all_chunks(progress=True):
     sessions = all_sessions(progress)
-    def get_chunks(session):
-        if not (get_session_storage_path(Path(sessions["session"])) / "metadata.pkl").exists():
-            return pd.Series([pd.NA], name="chunk")
+    def get_chunks(row):
+        if not (get_session_storage_path(Path(row["session"])) / "metadata.pkl").exists():
+            return pd.Series()
         else:
-            metadata = load_pickle(get_session_storage_path(Path(sessions["session"])) / "metadata.pkl")
+            metadata = load_pickle(get_session_storage_path(Path(row["session"])) / "metadata.pkl")
             coords = metadata["t_song_coords"].data
             n_chunks = int(np.ceil((coords.end - coords.start)/get_param("spectrogram_chunk_size_seconds")))
-            return pd.Series(np.arange(n_chunks), name="chunk")
-    all_chunks = sessions.apply(get_chunks)
-    all_chunks = all_chunks.loc[~pd.isna(all_chunks["chunk"])]
-    return all_chunks
+            return pd.Series(np.arange(n_chunks))
+    tqdm.tqdm.pandas(desc="getting n chunks")
+    all_chunks: pd.DataFrame = sessions.progress_apply(get_chunks, axis=1).stack()
+    all_chunks.index.names=["session_index", "chunk"]
+    all_chunks = all_chunks.reset_index()[["session_index", "chunk"]]
+    all_chunks = all_chunks.merge(sessions, how="outer", left_on="session_index", right_index=True)
+    all_chunks = all_chunks.drop(columns=["session_index"])
+    kept = all_chunks.loc[~pd.isna(all_chunks["chunk"])]
+    if len(kept.index) != len(all_chunks.index):
+        logger.warning(f"Removing some sessions because some metadata has not been computed...")
+    return kept
         
-    
             
-def retrieve(requires, generates, recompute_existing=False, n_per_group=None, reload=False, progress=True, save=True):
+def retrieve_tasks(requires, generates, recompute_existing=False, n_per_group=None, groups=["subject"], progress=True):
+    gen_keys = list(inspect.signature(generates).parameters.keys())
+    if "chunk" in gen_keys:
+        all_tasks: pd.DataFrame = all_chunks(progress=progress)
+    else:
+        all_tasks = all_sessions(progress=progress)
+    req_keys = list(inspect.signature(requires).parameters.keys())
+    def is_possible(row: pd.Series):
+        f = requires(*[row[k] for k in req_keys])
+        return np.all([r.exists() for r in f])
+    possible_tasks: pd.DataFrame = all_tasks.loc[all_tasks.apply(is_possible, axis=1)]
+    n_discarded = len(all_tasks.index) - len(possible_tasks.index)
+    if n_per_group is not None:
+        grouped_tasks = possible_tasks.groupby(groups).head(n_per_group)
+    else: 
+        grouped_tasks = possible_tasks
+    def is_already_done(row: pd.Series):
+        f = generates(*[row[k] for k in gen_keys])
+        return f.exists()
+    already_done = grouped_tasks.apply(is_already_done, axis=1)
+    n_already_done = already_done.sum()
+    left = (~already_done).sum()
+    if recompute_existing:
+        logger.info(f"Got {len(all_tasks.index)} tasks. n_discarded = {n_discarded}, selected={len(grouped_tasks.index)}, n_already_done_but_recomputing = {n_already_done}, left = {left}.")
+        res= grouped_tasks
+    else:
+        logger.info(f"Got {len(all_tasks.index)} tasks. n_discarded = {n_discarded}, selected={len(grouped_tasks.index)}, n_already_done = {n_already_done}, left = {left}.")
+        res= grouped_tasks.loc[~already_done]
+    return [tuple(x) for x in res[gen_keys].to_numpy()]
 
 
-    
+
 def retrieve_sessions(requires, generates, recompute_existing=False, n_per_subject=None, reload=False, progress=True, save=True):
     all_sessions = get_all_sessions(reload=reload, progress=progress, save=save, n_per_subject=n_per_subject)
     possible_sessions = [s for s in all_sessions if np.all([r.exists() for r in requires(s)])]

@@ -32,7 +32,7 @@ def compute_multispectrogram(sig: np.ndarray, song_t):
         stft_obj = scipy.signal.ShortTimeFFT(scipy.signal.windows.hamming(size), hop=int(fs/get_param("t_bin_fs")), fs=fs, scale_to="psd")
         _, p0 = stft_obj.lower_border_end
         _, p1 = stft_obj.upper_border_begin(sig.size)
-        times = stft_obj.t(sig.size, p0, p1)
+        times = stft_obj.t(sig.size, p0, p1) + song_t.start
         freqs = stft_obj.f
         start_freq_index, end_freq_index = np.searchsorted(freqs, [get_param("min_song_f")-get_param("f_spectrogram_shoulders"), get_param("max_song_f")+get_param("f_spectrogram_shoulders")] )
         spectrogram = stft_obj.spectrogram(sig, p0=p0, p1=p1)
@@ -65,21 +65,20 @@ def as_xarray_spectrogram(times, freqs, spec):
     
     return arr
 
-def computation(d: xr.Dataset, s: Path):
+def computation(d: xr.Dataset, s: Path, c):
     d=d.drop_dims([dim for dim in d.dims if not dim in ["t_song"]])
-    chunk_size_seconds=10
-    n_chunks = int(np.ceil((d["t_song_coords"].data.end - d["t_song_coords"].data.start)/chunk_size_seconds))
     start = d["t_song_coords"].data.start
-    for i in tqdm.tqdm(range(n_chunks)):
-        chunk_start = start+ i*chunk_size_seconds - get_param("t_spectrogram_min_window_seconds")
-        chunk_end = start+ (i+1)*chunk_size_seconds + get_param("t_spectrogram_min_window_seconds")
-        chunk = regsel(d, t_song = slice(chunk_start,chunk_end))
-        if chunk.sizes["t_song"] < get_param("t_spectrogram_min_window_seconds"):
-            break
-        chunk["spectrogram"] = as_xarray_spectrogram(*compute_multispectrogram(chunk["filtered_song"].to_numpy(), chunk["t_song_coords"].data))
-        print(chunk)
-        print("")
-    exit()
+    
+    chunk_start = start+ c*get_param("spectrogram_chunk_size_seconds") - get_param("t_spectrogram_min_window_seconds")
+    chunk_end = start+ (c+1)*get_param("spectrogram_chunk_size_seconds") + get_param("t_spectrogram_min_window_seconds")
+    chunk = regsel(d, t_song = slice(chunk_start,chunk_end))
+    chunk["spectrogram"] = as_xarray_spectrogram(*compute_multispectrogram(chunk["filtered_song"].to_numpy(), chunk["t_song_coords"].data))
+    # chunk["t_bin"] = chunk["t_bin_coords"].data.arr
+    # print(chunk["spectrogram"].where(chunk["spectrogram"].notnull(), drop=True))
+    # np.log(chunk["spectrogram"]).plot.pcolormesh()
+    # plt.title(f"s={s}, chunk={c}")
+    # plt.show()
+    # exit()
     # d = regsel(d, t_song=slice(0, 30))
     # d["spectrogram"] = as_xarray_spectrogram(*compute_multispectrogram(d["filtered_song"].to_numpy(), d["t_song_coords"].data))
     # d = d[["spectrogram"]]
@@ -113,43 +112,44 @@ def computation(d: xr.Dataset, s: Path):
     
     # plt.show()
     # print(d)
-    return d
+    return chunk[["spectrogram"]]
 
 
 # ============================================================================ #
 # Run
 # ============================================================================ #
 
-stop_on_error=True
+stop_on_error=False
 pd.Series.buffered_errors=not stop_on_error
 write_output=True
 
 
-def requires(s):
-    return [get_session_storage_path(s)/"song/song_filtered.pkl"]
+def requires(session):
+    return [get_session_storage_path(session)/"song/song_filtered.pkl"]
 
-def generates(s, chunk) -> Path:
-    return get_session_storage_path(s)/f"song/song_filtered_spectrogram/chunk_{chunk}.pkl"
+def generates(session, chunk) -> Path:
+    return get_session_storage_path(session)/f"song/song_filtered_spectrogram/chunk_{chunk}.pkl"
 
 # def get_chunk(session):
 #     coords = load_pickle(get_session_storage_path(session)/"metadata.pkl")["t_song_coords"].data
 #     n_chunks = int(np.ceil((coords.end - coords.start)/get_param("spectrogram_chunk_size_seconds")))
 #     return list(np.arange(n_chunks))
 
-sessions = retrieve_tasks(requires, generates, recompute_existing=True, n_per_subject=2, keys=dict(chunk=get_chunk))
+sessions = retrieve_tasks(requires, generates, recompute_existing=False, n_per_group=None)
 
 errors = []
 
-for s,chunk in tqdm.tqdm(sessions):
+def task(session):
+    s,c = session
     try:
         if len(requires(s)) > 0:
             d = xr.merge([load_pickle(f) for f in requires(s)])
         else:
             d= xr.Dataset()
 
-        res = computation(d, s, chunk)
+        res = computation(d, s, c)
         if write_output:
-            out = generates(s)
+            out = generates(s, c)
             out.parent.mkdir(exist_ok=True, parents=True)
             tmp_file = out.parent/ (out.stem + ".tmp"+out.suffix)
             with  tmp_file.open("wb") as f:
@@ -158,12 +158,42 @@ for s,chunk in tqdm.tqdm(sessions):
         else:
             print(res)
     except Exception as e:
-        e.add_note(f'During computation for session {s}')
+        e.add_note(f'During computation for task {s, c}')
         errors.append(e)
         if stop_on_error:
             raise
         else:
-            logger.error(f'Error during computation for session {s}')
+            logger.error(f'Error during computation for task {s, c}')
+    
+import concurrent.futures
+
+with concurrent.futures.ProcessPoolExecutor(5) as e:
+    futures = list(tqdm.tqdm(e.map(task, sessions), total=len(sessions)))
+    # for _ in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(sessions)): pass
+# for s,c in tqdm.tqdm(sessions):
+#     try:
+#         if len(requires(s)) > 0:
+#             d = xr.merge([load_pickle(f) for f in requires(s)])
+#         else:
+#             d= xr.Dataset()
+
+#         res = computation(d, s, c)
+#         if write_output:
+#             out = generates(s, c)
+#             out.parent.mkdir(exist_ok=True, parents=True)
+#             tmp_file = out.parent/ (out.stem + ".tmp"+out.suffix)
+#             with  tmp_file.open("wb") as f:
+#                 pickle.dump(res, f)
+#             tmp_file.rename(out)
+#         else:
+#             print(res)
+#     except Exception as e:
+#         e.add_note(f'During computation for task {s, c}')
+#         errors.append(e)
+#         if stop_on_error:
+#             raise
+#         else:
+#             logger.error(f'Error during computation for task {s, c}')
 
 if len(errors) > 0:
     if len(errors) > 1:
