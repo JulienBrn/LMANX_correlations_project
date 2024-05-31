@@ -1,0 +1,10 @@
+
+---
+min_song_f: 500 #Hz
+max_song_f: 8000 #Hz
+
+t_bin_fs: 1000 #(1ms precision)
+f_resolution_at_min_f: 2 #(2Hz between each frequency bin at min_song_f)
+t_spectrogram_min_window_seconds: 0.01 #(10ms-20ms windows)
+f_spectrogram_shoulders: 100
+
