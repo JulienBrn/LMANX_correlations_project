@@ -27,7 +27,7 @@ def filter_song(sig, fs):
     return res
 
 def computation(d: xr.Dataset, s: Path):
-    print(d)
+    # print(d)
     d=d.drop_dims([dim for dim in d.dims if not dim in ["t_song", "song_metadata"]])
     d["song_data"] = xr.DataArray(np.load(get_session_source_path(s)/d["song_metadata_values"].sel(song_metadata="carmen_song_file").item()).reshape(-1), dims="t_song")
     d["filtered_song"] = xr.apply_ufunc(filter_song, d["song_data"], d["t_song_coords"].data.fs, input_core_dims=[["t_song"], []], output_core_dims=[["t_song"]], vectorize=True)
@@ -51,11 +51,11 @@ def requires(session):
 def generates(session) -> Path:
     return get_session_storage_path(session)/"song/song_filtered.pkl"
 
-sessions = retrieve_tasks(requires, generates, recompute_existing=True, n_per_subject=None)
+sessions = retrieve_tasks(requires, generates, recompute_existing=True, n_per_group=None)
 
 errors = []
 
-for s in tqdm.tqdm(sessions):
+for s, in tqdm.tqdm(sessions):
     try:
         if len(requires(s)) > 0:
             d = xr.merge([load_pickle(f) for f in requires(s)])

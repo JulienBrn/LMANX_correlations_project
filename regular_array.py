@@ -19,14 +19,18 @@ class RegularArray:
         self.dtype=np.dtype(dtype)
 
     @staticmethod
-    def from_params(ndata=None, start=None, end=None, fs=None, d=None, border_right="<=", border_left="<<", shift=0, dtype=float):
+    def from_params(ndata=None, start=None, end=None, fs=None, d=None, border_right="<=", border_left="<<", shift=None, dtype=float):
         match d, fs:
             case None, None: pass
             case _, None: fs = 1/d
             case None, _: pass
             case _, _: raise Exception("Both fs and d cannot be specified")
 
-
+        if fs is None:
+            if start is not None and end is not None and ndata is not None:
+                if border_right=="<=" and border_left =="<<":
+                    fs = ndata/(end-start+1)
+                    end=None
         
         
         if not fs is None:
@@ -35,7 +39,7 @@ class RegularArray:
                 shift_end = end - np.floor(end/fs) * fs if not end is None else np.nan
                 shift = np.nanmean([shift_start, shift_end])
                 if np.isnan(shift):
-                    raise Exception("Can not guess shift if neither start or end is given")
+                    shift=0
             def get_index(val, border):
                 return RegularArray.get_index(val, shift, fs, border)
 
@@ -70,20 +74,19 @@ class RegularArray:
     #         raise Exception("error")
     #     return r
     
-    # @staticmethod
-    # def from_array(a, rounding=10**(-3), precision_ratio=10**(-2), dtype=float):
-    #     import sklearn.linear_model
-    #     m = sklearn.linear_model.LinearRegression().fit(np.arange(a.size).reshape(-1, 1), a.reshape(-1))
-    #     start = np.round(m.intercept_/ rounding) * rounding
-    #     if start==0:
-    #         start=0
-    #     fs = np.round((1/m.coef_[0]) / rounding) * rounding
-    #     end = start+a.size/fs
-    #     res = RegularArray(start, end, fs, endpoint=False, dtype=dtype)
-    #     if (np.abs(res.arr-a)*fs < precision_ratio).all():
-    #         return res
-    #     else:
-    #         raise Exception("Not a regular array")
+    @staticmethod
+    def from_array(a, dtype=float):
+        import sklearn.linear_model
+        m = sklearn.linear_model.LinearRegression().fit(np.arange(a.size).reshape(-1, 1), a.reshape(-1))
+        start = m.intercept_
+        fs = 1/m.coef_[0]
+        rounded_fs = np.round(fs*10**3)/10**3
+        res = RegularArray.from_params(start=start, fs=rounded_fs, ndata=a.size, shift=None, dtype=dtype, border_left="~=", border_right="~=")
+        if (np.abs(res.arr-a)*fs < 10**(-1)).all():
+            return res
+        else:
+            raise Exception(f"not regular enough {res} {a} {(res.arr-a)*fs}")
+
     @property 
     def end(self):
         return (self.start_index + self.npoints)/self.fs + self.shift
