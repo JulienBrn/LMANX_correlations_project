@@ -4,42 +4,50 @@ import tqdm.auto as tqdm
 import pickle, yaml, importlib
 import matplotlib.pyplot as plt, seaborn as sns, matplotlib
 from helper import search, singleglob, fastsearch, subarray_positions
+import logging, beautifullogger
+
+logger=logging.getLogger(__name__)
+beautifullogger.setup(displayLevel=logging.INFO)
 
 session = Path("../Data/AreaXB602022-04-20_15-16-37")
 song_fs = 32000
 slice_start=0
 slice_end=None
-# slice_start=3500*song_fs
-# slice_end=4000*song_fs
+slice_start=3500*song_fs
+slice_end=4000*song_fs
 song = xr.DataArray(np.load(singleglob(session, "**/song.npy")).reshape(-1), dims="t_song")[slice_start:slice_end]
 labels = pd.read_csv(singleglob(session, "**/uncorrected_labels.txt"), sep=",", header=None, names=["uncorrected_start_index", "uncorrected_end_index", "syb_name"])
 labels["uncorrected_start_index"] = labels["uncorrected_start_index"] - slice_start
 labels["uncorrected_end_index"] = labels["uncorrected_end_index"] - slice_start
 labels = labels.loc[(labels["uncorrected_start_index"] >= 0) & (labels["uncorrected_end_index"] < song.size)]
 label_threshold = 2*10**(-4)
-
 song["t_song"] = np.arange(song.size)/song_fs
 draw = True
+
+labels["prev_uncorrected_end"] = labels["uncorrected_end_index"].shift(1)
+labels["next_uncorrected_start"] = labels["uncorrected_start_index"].shift(-1)
+if (labels["uncorrected_start_index"] < labels["prev_uncorrected_end"]).any():
+    logger.warning(f'Problem with initial labels at indices\n{labels.loc[labels["uncorrected_start_index"] < labels["uncorrected_end_index"].shift(1)]}\nAdjusting starts...')
+    labels["uncorrected_start_index"] = np.where(labels["prev_uncorrected_end"] > labels["uncorrected_start_index"], labels["prev_uncorrected_end"], labels["uncorrected_start_index"]).astype(int)
+
 print("loaded")
-print(labels)
+
+# print(labels)
 amp = np.abs(song).rolling(t_song=int(song_fs/100)).mean()
 amp_at_label_start = amp.sel(t_song=labels["uncorrected_start_index"].to_numpy()/song_fs, method="nearest").quantile(0.2).item()
 label_threshold = amp_at_label_start
 
 tqdm.tqdm.pandas(desc="Computing real start/ind indices")
-# labels["start_index"] = labels["uncorrected_start_index"].progress_apply(lambda i: fastsearch((amp < label_threshold).to_numpy(), i, -1, int(song_fs/10), -1))
-print("starting")
 labels["start_index"] = fastsearch((amp < label_threshold).to_numpy().reshape(1, -1), labels["uncorrected_start_index"].to_numpy().copy(), -1, int(song_fs/10), -1)
 labels["end_index"] = fastsearch((amp < label_threshold).to_numpy().reshape(1, -1), labels["uncorrected_end_index"].to_numpy().copy(), 1, int(song_fs/10), -1)
 
 labels=labels.loc[(labels["start_index"] >= 0) & (labels["end_index"] >= 0)]
 
-# labels["start_index"]= np.where(labels["start_index"]==-1, np.nan,  labels["start_index"])
-# labels["end_index"]= np.where(labels["end_index"]==-1, np.nan,  labels["end_index"])
+labels["prev_end"] = labels["end_index"].shift(1)
+labels["next_start"] = labels["start_index"].shift(-1)
+labels["start_index"] = np.where(labels["prev_uncorrected_end"] > labels["start_index"], labels["prev_uncorrected_end"], labels["start_index"]).astype(int)
+labels["end_index"] = np.where(labels["next_uncorrected_start"] < labels["end_index"], labels["next_uncorrected_start"], labels["end_index"]).astype(int)
 
-print("ending")
-labels["uncorrected_start_index"] = labels["uncorrected_start_index"]
-labels["uncorrected_end_index"] = labels["uncorrected_end_index"]
 
 valid_positions = np.sort(np.unique(np.concatenate(
     [i+np.arange(len(motif)) for motif in [
@@ -48,7 +56,6 @@ valid_positions = np.sort(np.unique(np.concatenate(
 )))
 
 labels2 = labels.iloc[valid_positions]
-# print(labels)
 labels2=labels2.loc[labels2["syb_name"] == "a"]
 labels2["subsybsongpos"] = np.round(labels2["start_index"]+song_fs/100).astype(int)
 features = pd.DataFrame()
@@ -72,18 +79,14 @@ def compute_pitch(a):
 features["entropy"] = xr.apply_ufunc(lambda a: compute_entropy(a), song.isel(t_song=sybpos+time_around), input_core_dims=[["win_index"]], vectorize=True)
 features["pitch"] = xr.apply_ufunc(lambda a: compute_pitch(a), song.isel(t_song=sybpos+time_around), input_core_dims=[["win_index"]], vectorize=True)
 features=features.set_index("subsybsongpos")
-print(features)
 
 import sklearn.preprocessing, sklearn.decomposition, sklearn.linear_model
 scaler = sklearn.preprocessing.StandardScaler()
 rescaled_features = pd.DataFrame()
 rescaled_features[features.columns] = scaler.fit_transform(features)
-# print(rescaled_features)
 
 pca = sklearn.decomposition.PCA()
 pca_feats = pca.fit_transform(rescaled_features)
-# pca_feats = pd.DataFrame(pca)
-# print(pca_feats)
 
 bua_fs=1000
 bua = xr.DataArray(np.load(singleglob(session, "**/CSC17*.npy")).reshape(-1), dims="t_bua")
@@ -99,13 +102,6 @@ model.fit(pca_feats, syb_bua[f"bua_lag{lag}"])
 score=model.score(pca_feats, syb_bua[f"bua_lag{lag}"])
 transformed = model.predict(pca_feats)
 
-# model.fit(features, syb_bua[f"bua_lag{lag}"])
-# score=model.score(features, syb_bua[f"bua_lag{lag}"])
-# transformed = model.predict(features)
-# print(transformed.shape)
-# print(syb_bua.shape)
-# print(score)
-
 n_bootstrap=5000
 syb_bua_bootstrapped = pd.DataFrame()
 bt_positions=np.random.randint(syb_bua["subsybsongpos"].min(), syb_bua["subsybsongpos"].max(), size=syb_bua["subsybsongpos"].size*n_bootstrap)
@@ -115,10 +111,8 @@ syb_bua_bootstrapped["bt_index"] = (np.arange(n_bootstrap).reshape(-1, 1)* np.on
 syb_bua_bootstrapped["bua"] = bua.sel(t_bua=bt_positions/song_fs, method="nearest").to_numpy()
 tqdm.tqdm.pandas(desc="bootstrap")
 bt = syb_bua_bootstrapped.groupby("bt_index").progress_apply(lambda d: sklearn.linear_model.LinearRegression().fit(pca_feats, d["bua"]).score(pca_feats, d["bua"]))
-# bt = syb_bua_bootstrapped.groupby("bt_index").progress_apply(lambda d: sklearn.linear_model.LinearRegression().fit(features, d["bua"]).score(features, d["bua"]))
 bt = bt.to_frame(name="score")
 p_value = (bt["score"] > score).sum()/bt["score"].size
-print(p_value)
 
 feat_models = pd.DataFrame()
 feat_models["feat"] = [f for f in features.columns if not "subsybsongpos" in f]
@@ -135,8 +129,8 @@ feat_models["bt_score_dist"] = feat_models.progress_apply(lambda row:
 , axis=1)
 feat_models["p_value"] = feat_models.apply(lambda row: np.sum(row["bt_score_dist"] > row["score"])/row["bt_score_dist"].size, axis=1)
 feat_models = feat_models.set_index("feat")
-print(feat_models)
 features=features.reset_index()
+
 if draw:
     f =  plt.figure(layout="tight")
     grid = matplotlib.gridspec.GridSpec(7, 12, figure=f)
