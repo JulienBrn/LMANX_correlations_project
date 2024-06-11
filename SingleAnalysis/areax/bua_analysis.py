@@ -13,10 +13,10 @@ session = Path("../Data/AreaXB602022-04-20_15-16-37")
 song_fs = 32000
 slice_start=0
 slice_end=None
-slice_start=3500*song_fs
+# slice_start=3400*song_fs
 slice_end=4000*song_fs
 song = xr.DataArray(np.load(singleglob(session, "**/song.npy")).reshape(-1), dims="t_song")[slice_start:slice_end]
-labels = pd.read_csv(singleglob(session, "**/uncorrected_labels.txt"), sep=",", header=None, names=["uncorrected_start_index", "uncorrected_end_index", "syb_name"])
+labels = pd.read_csv(singleglob(session, "**/uncorrected_labels.csv"), sep=",", header=None, names=["uncorrected_start_index", "uncorrected_end_index", "syb_name"])
 labels["uncorrected_start_index"] = labels["uncorrected_start_index"] - slice_start
 labels["uncorrected_end_index"] = labels["uncorrected_end_index"] - slice_start
 labels = labels.loc[(labels["uncorrected_start_index"] >= 0) & (labels["uncorrected_end_index"] < song.size)]
@@ -24,6 +24,7 @@ label_threshold = 2*10**(-4)
 song["t_song"] = np.arange(song.size)/song_fs
 draw = True
 
+# print(labels)
 labels["prev_uncorrected_end"] = labels["uncorrected_end_index"].shift(1)
 labels["next_uncorrected_start"] = labels["uncorrected_start_index"].shift(-1)
 if (labels["uncorrected_start_index"] < labels["prev_uncorrected_end"]).any():
@@ -41,7 +42,9 @@ tqdm.tqdm.pandas(desc="Computing real start/ind indices")
 labels["start_index"] = fastsearch((amp < label_threshold).to_numpy().reshape(1, -1), labels["uncorrected_start_index"].to_numpy().copy(), -1, int(song_fs/10), -1)
 labels["end_index"] = fastsearch((amp < label_threshold).to_numpy().reshape(1, -1), labels["uncorrected_end_index"].to_numpy().copy(), 1, int(song_fs/10), -1)
 
-labels=labels.loc[(labels["start_index"] >= 0) & (labels["end_index"] >= 0)]
+# labels=labels.loc[(labels["start_index"] >= 0) & (labels["end_index"] >= 0)]
+labels["start_index"] = np.where(labels["start_index"]<0, labels["uncorrected_start_index"], labels["start_index"])
+labels["end_index"] = np.where(labels["end_index"]<0, labels["uncorrected_end_index"], labels["end_index"])
 
 labels["prev_end"] = labels["end_index"].shift(1)
 labels["next_start"] = labels["start_index"].shift(-1)
@@ -90,7 +93,7 @@ pca_feats = pca.fit_transform(rescaled_features)
 
 bua_fs=1000
 bua = xr.DataArray(np.load(singleglob(session, "**/CSC17*.npy")).reshape(-1), dims="t_bua")
-bua["t_bua"] = np.arange(bua.size)/bua_fs
+bua["t_bua"] = np.arange(bua.size)/bua_fs - slice_start/song_fs
 bua = bua.sel(t_bua = slice(song["t_song"].min().item(), song["t_song"].max().item()))
 
 lag=20
