@@ -8,7 +8,7 @@ from helper import singleglob, fastsearch, subarray_positions, get_param
 import logging, beautifullogger
 
 logger=logging.getLogger(__name__)
-beautifullogger.setup(displayLevel=logging.INFO)
+beautifullogger.setup(displayLevel=logging.WARNING)
 rd_generator = np.random.default_rng()
 
 session = Path("../Data/AreaXB602022-04-20_15-16-37")
@@ -18,9 +18,11 @@ t_end = get_param("t_end")
 if not t_end:
     t_end=np.inf
 song_dataset = xr.Dataset()
+song_dataset = song_dataset.assign_coords(song_fs = song_fs)
 song_dataset["song"] = xr.DataArray(np.load(singleglob(session, "**/song.npy")).reshape(-1), dims="t")
 song_dataset["t"] = np.arange(song_dataset["song"].size)/song_fs
 song_dataset = song_dataset.sel(t=slice(t_start, t_end))
+
 
 syb_dataset = xr.Dataset.from_dataframe(pd.read_csv(singleglob(session, "**/uncorrected_labels.csv"), sep=",", header=None, names=["uncorrected_start_index", "uncorrected_end_index", "syb_name"]))
 syb_dataset["uncorrected_start"] = syb_dataset["uncorrected_start_index"]/song_fs
@@ -31,9 +33,21 @@ syb_dataset = syb_dataset[["uncorrected_start", "uncorrected_end", "syb_name"]]
 
 bua_fs=1000
 neuro_dataset = xr.Dataset()
-neuro_dataset["bua"] = xr.DataArray(np.load(singleglob(session, "**/CSC17*.npy")).reshape(-1), dims="t")
-neuro_dataset["t"] = np.arange(neuro_dataset["bua"].size)/bua_fs
+neuro_dataset = neuro_dataset.assign_coords(neuro_fs=bua_fs)
+neuro_dataset["bua"] = xr.DataArray(np.load(singleglob(session, "**/CSC17*.npy")).reshape(-1), dims="t").expand_dims(sensor=["CSC17"])
+
+neurons=["ch11#1"]
+spikes=[]
+for n in neurons:
+    ar = xr.DataArray(np.loadtxt(singleglob(session, f"**/{n}.txt")).reshape(-1), dims="spike")
+    ar = ar.assign_coords(spike_num=("spike", np.arange(ar.size)), neuron=n)
+    spikes.append(ar)
+
+tmp_spikes = xr.concat(spikes, "spike")
+neuro_dataset["t"] = np.arange(neuro_dataset["t"].size)/bua_fs
 neuro_dataset = neuro_dataset.sel(t=slice(t_start, t_end))
+neuro_dataset["spikes"] = tmp_spikes.where((tmp_spikes >=t_start) & (tmp_spikes <=t_end), drop=True)
+
 
 
 # ============================================================================ #
@@ -120,8 +134,6 @@ def compute_pitch(a):
     from pitch import processPitch
     return processPitch(a, song_fs, 1500, 2500)
 
-# features["entropy"] = 
-# features["pitch"] = xr.apply_ufunc(lambda a: compute_pitch(a), song.isel(t_song=sybpos+time_around), input_core_dims=[["win_index"]], vectorize=True)
 
 accoustic_features = xr.Dataset()
 accoustic_window = xr.DataArray(np.arange(2*int(song_fs*get_param("accoustic_window")/2)+1) - int(song_fs*get_param("accoustic_window")/2)/song_fs, dims="win_index")
@@ -129,7 +141,7 @@ accoustics_window_data = song_dataset["filtered_song"].sel(t=accoustic_window + 
 # print(accoustics_window_data)
 accoustic_features["entropy"] = xr.apply_ufunc(compute_entropy, accoustics_window_data, input_core_dims=[["win_index"]], vectorize=True)
 accoustic_features["pitch"] = xr.apply_ufunc(compute_pitch, accoustics_window_data, input_core_dims=[["win_index"]], vectorize=True)
-accoustic_features["amp"] = song_dataset["filtered_song"].sel(t=subsyllables["subsyllable_t"], method="nearest")
+accoustic_features["amp"] = song_dataset["amp"].sel(t=subsyllables["subsyllable_t"], method="nearest")
 
 # print(accoustic_features)
 
@@ -141,11 +153,47 @@ subsyllables["accoustic_features"] = accoustic_features.to_array(dim="accoustic"
 # Computing neuronal Features
 # ============================================================================ #
 
+def compute_ifr(spike_times):
+    from elephant.statistics import instantaneous_rate
+    from elephant import kernels
+    from neo import SpikeTrain
+    import quantities as pq
+    kernel_sigma = get_param("spike_kernel_duration")*pq.s # decided by Arthur
+    sampling_period_ifr = 1*pq.ms
+
+    kernel = kernels.GaussianKernel(sigma=kernel_sigma)
+
+    st = SpikeTrain(
+        spike_times.to_numpy(),
+        t_stop=neuro_dataset["t"].max().item()+1/bua_fs,
+        t_start=neuro_dataset["t"].min().item(),
+        units="s",
+        sampling_rate=bua_fs * pq.Hz,
+    )  # necessary to convert to use elephant
+
+    ifr = instantaneous_rate(st, sampling_period=sampling_period_ifr, kernel=kernel).reshape(-1) # downsampled to 1000Hz
+    # print(neuro_dataset["t"].size)
+    # print(ifr.shape)
+    if np.isnan(ifr).any():
+        raise Exception("NA problems")
+    return xr.DataArray(ifr, dims="t")
+
+if len(neurons) >=2:
+    neuron_ifrs = neuro_dataset["spikes"].groupby("neuron").map(compute_ifr)
+    neuro_dataset["ifr"] = neuron_ifrs
+elif len(neurons) == 1:
+    neuro_dataset[f"ifr"] = compute_ifr(neuro_dataset["spikes"]).expand_dims(neuron=[neurons[0]])
+
+
 lags = xr.DataArray(get_param("lags"), dims="lag", coords=dict(lag=get_param("lags")))
-neuro_features = neuro_dataset[["bua"]].to_array(dim="neuro").sel(t=subsyllables["subsyllable_t"] -lags , method="nearest")
+prepared_bua = neuro_dataset["bua"].assign_coords(sensor=neuro_dataset["sensor"] + "_bua").rename(sensor="neuro")
+prepared_ifr = neuro_dataset["ifr"].assign_coords(neuron=neuro_dataset["neuron"]+"_ifr").rename(neuron="neuro")
+neuro_features = xr.concat([prepared_bua, prepared_ifr], dim="neuro").sel(t=subsyllables["subsyllable_t"] -lags , method="nearest")
 subsyllables["neuro_features"] = neuro_features
+if subsyllables["neuro_features"].isnull().any():
+    raise Exception("neuro feat extract na pb")
 # print(neuro_features)
-print(subsyllables)
+# print(subsyllables)
 
 # ============================================================================ #
 # Computing Models
@@ -194,4 +242,4 @@ for feat, target in [("accoustic", "neuro"), ("neuro", "accoustic")]:
 print(models_dataset)
 
 with (session / "analysis_data.pkl").open("wb") as f:
-    pickle.dump([song_dataset, syb_dataset, subsyllables, models_dataset], f)
+    pickle.dump([song_dataset, syb_dataset, subsyllables, models_dataset, neuro_dataset], f)
