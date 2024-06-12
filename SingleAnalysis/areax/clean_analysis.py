@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np, pandas as pd, xarray as xr
+import sklearn.preprocessing, sklearn.decomposition, sklearn.linear_model
 import tqdm.auto as tqdm
 import pickle, yaml, importlib
 import matplotlib.pyplot as plt, seaborn as sns, matplotlib
@@ -8,6 +9,7 @@ import logging, beautifullogger
 
 logger=logging.getLogger(__name__)
 beautifullogger.setup(displayLevel=logging.INFO)
+rd_generator = np.random.default_rng()
 
 session = Path("../Data/AreaXB602022-04-20_15-16-37")
 song_fs = 32000
@@ -38,7 +40,18 @@ neuro_dataset = neuro_dataset.sel(t=slice(t_start, t_end))
 # Handling song
 # ============================================================================ #
 
-song_dataset["amp"] = np.abs(song_dataset["song"]).rolling(t=int(song_fs*get_param("amp_window_size"))).mean()
+def filter_song(sig, fs):
+    import scipy.signal
+    if fs > 2*get_param("max_song_f") :
+        filter = scipy.signal.butter(4, [get_param("min_song_f"), get_param("max_song_f")], btype="bandpass", fs=fs, output="sos")
+    else:
+        logger.warning(f"Impossible to bandfilter song because song_fs = {fs}, falling back to highpassing")
+        filter = scipy.signal.butter(4, get_param("min_song_f"), btype="highpass", fs=fs, output="sos")
+    res = scipy.signal.sosfiltfilt(filter, sig)
+    return res
+
+song_dataset["filtered_song"] = xr.apply_ufunc(filter_song, song_dataset["song"], song_fs, input_core_dims=[["t"]]+ [[]], output_core_dims=[["t"]])
+song_dataset["amp"] = np.abs(song_dataset["filtered_song"]).rolling(t=int(song_fs*get_param("amp_window_size"))).mean()
 
 # ============================================================================ #
 # Adjusting syllables
@@ -85,7 +98,8 @@ valid_syllables["subsyllable_name"] = valid_syllables["syb_name"].astype(object)
 subsyllables = valid_syllables.stack(subindex=["index", "syb_position"]).reset_index("subindex")
 subsyllables = subsyllables.where(subsyllables["subsyllable_t"], drop=True)
 subsyllables = subsyllables[["syb_name", "subsyllable_t", "subsyllable_name"]]
-print(subsyllables)
+subsyllables = subsyllables.set_coords("subsyllable_name")
+# print(subsyllables)
 
 
 # ============================================================================ #
@@ -111,13 +125,73 @@ def compute_pitch(a):
 
 accoustic_features = xr.Dataset()
 accoustic_window = xr.DataArray(np.arange(2*int(song_fs*get_param("accoustic_window")/2)+1) - int(song_fs*get_param("accoustic_window")/2)/song_fs, dims="win_index")
-accoustics_window_data = song_dataset["song"].sel(t=accoustic_window + subsyllables["subsyllable_t"], method="nearest")
-print(accoustics_window_data)
+accoustics_window_data = song_dataset["filtered_song"].sel(t=accoustic_window + subsyllables["subsyllable_t"], method="nearest")
+# print(accoustics_window_data)
 accoustic_features["entropy"] = xr.apply_ufunc(compute_entropy, accoustics_window_data, input_core_dims=[["win_index"]], vectorize=True)
 accoustic_features["pitch"] = xr.apply_ufunc(compute_pitch, accoustics_window_data, input_core_dims=[["win_index"]], vectorize=True)
+accoustic_features["amp"] = song_dataset["filtered_song"].sel(t=subsyllables["subsyllable_t"], method="nearest")
 
-print(accoustic_features)
-# print(song_dataset)
-# print(neuro_dataset)
-# print(syb_dataset)
-# print(valid_syllables)
+# print(accoustic_features)
+
+subsyllables["accoustic_features"] = accoustic_features.to_array(dim="accoustic")
+
+# print(subsyllables)
+
+# ============================================================================ #
+# Computing neuronal Features
+# ============================================================================ #
+
+lags = xr.DataArray(get_param("lags"), dims="lag", coords=dict(lag=get_param("lags")))
+neuro_features = neuro_dataset[["bua"]].to_array(dim="neuro").sel(t=subsyllables["subsyllable_t"] -lags , method="nearest")
+subsyllables["neuro_features"] = neuro_features
+# print(neuro_features)
+print(subsyllables)
+
+# ============================================================================ #
+# Computing Models
+# ============================================================================ #
+
+models_dataset = xr.Dataset()
+
+subsyllables["bootstrap_indices"] = subsyllables.groupby("subsyllable_name").map(
+    lambda d: xr.DataArray(rd_generator.integers(0, d.sizes["subindex"], size=(d.sizes["subindex"], get_param("n_bootstrap"))), dims=["subindex", "bootstrap"]))
+
+subsyllables["bootstrap_accoustic_features"] = subsyllables.groupby("subsyllable_name").map(lambda d: d["accoustic_features"].isel(subindex = d["bootstrap_indices"]))
+subsyllables["bootstrap_neuro_features"] = subsyllables.groupby("subsyllable_name").map(lambda d: d["neuro_features"].isel(subindex = d["bootstrap_indices"]))
+
+
+def lin_fitmodel(f, t):
+    return sklearn.linear_model.LinearRegression().fit(f, t)
+
+def predict(m, f):
+    return m.predict(f)
+
+for feat, target in [("accoustic", "neuro"), ("neuro", "accoustic")]:
+    for prefix in ("", "bootstrap_"):
+        models_dataset[f"{prefix}{feat}2{target}_model"] = xr.apply_ufunc(
+            lin_fitmodel, subsyllables[f"{feat}_features"].groupby("subsyllable_name"), subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"),
+            input_core_dims=[["subindex", feat]] + [["subindex", target]],
+            output_core_dims=[[]],
+            vectorize=True
+        )
+
+        subsyllables[f"{prefix}predicted_{target}_features"] = xr.apply_ufunc(
+            predict, models_dataset[f"{prefix}{feat}2{target}_model"], subsyllables[f"{feat}_features"].groupby("subsyllable_name"), 
+            input_core_dims=  [[]] + [["subindex", feat]],
+            output_core_dims=[["subindex", target]],
+            vectorize=True
+        )
+        var_res= ((subsyllables[f"{prefix}predicted_{target}_features"] - subsyllables[f"{prefix}{target}_features"])**2).groupby("subsyllable_name").sum()
+        var_to_mean = ((subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name").mean() - subsyllables[f"{prefix}{target}_features"])**2).groupby("subsyllable_name").sum()
+        models_dataset[f"{prefix}{feat}2{target}_score"] = 1 - var_res / var_to_mean
+
+
+# ============================================================================ #
+# Finalizing
+# ============================================================================ #
+
+
+print(models_dataset)
+
+with (session / "analysis_data.pkl").open("wb") as f:
+    pickle.dump([song_dataset, syb_dataset, subsyllables, models_dataset], f)

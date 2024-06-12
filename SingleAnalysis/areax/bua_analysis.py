@@ -13,8 +13,8 @@ session = Path("../Data/AreaXB602022-04-20_15-16-37")
 song_fs = 32000
 slice_start=0
 slice_end=None
-# slice_start=3400*song_fs
-slice_end=4000*song_fs
+slice_start=3400*song_fs
+slice_end=4600*song_fs
 song = xr.DataArray(np.load(singleglob(session, "**/song.npy")).reshape(-1), dims="t_song")[slice_start:slice_end]
 labels = pd.read_csv(singleglob(session, "**/uncorrected_labels.csv"), sep=",", header=None, names=["uncorrected_start_index", "uncorrected_end_index", "syb_name"])
 labels["uncorrected_start_index"] = labels["uncorrected_start_index"] - slice_start
@@ -105,7 +105,7 @@ model.fit(pca_feats, syb_bua[f"bua_lag{lag}"])
 score=model.score(pca_feats, syb_bua[f"bua_lag{lag}"])
 transformed = model.predict(pca_feats)
 
-n_bootstrap=5000
+n_bootstrap=500
 syb_bua_bootstrapped = pd.DataFrame()
 bt_positions=np.random.randint(syb_bua["subsybsongpos"].min(), syb_bua["subsybsongpos"].max(), size=syb_bua["subsybsongpos"].size*n_bootstrap)
 syb_bua_bootstrapped["subsybsongpos"] = bt_positions
@@ -180,16 +180,16 @@ if draw:
 
     song_ax.vlines(labels["start_index"]/song_fs, song.min().item(), song.max(), color="green", alpha=0.5)
     song_ax.vlines(labels["end_index"]/song_fs, song.min().item(), song.max(), color="red", alpha=0.5)
-    song_ax.vlines(labels["uncorrected_start_index"]/song_fs, song.min().item(), song.max(), color="lightgreen", linestyle=":")
-    song_ax.vlines(labels["uncorrected_end_index"]/song_fs, song.min().item(), song.max(), color="pink", linestyle=":")
+    # song_ax.vlines(labels["uncorrected_start_index"]/song_fs, song.min().item(), song.max(), color="lightgreen", linestyle=":")
+    # song_ax.vlines(labels["uncorrected_end_index"]/song_fs, song.min().item(), song.max(), color="pink", linestyle=":")
     song_ax.scatter(labels2["subsybsongpos"].to_numpy()/song_fs,np.ones(labels2["subsybsongpos"].shape) * (song.max().item())/2, color="black")
     for _, row in labels.iterrows():
         song_ax.text((row["uncorrected_start_index"]+row["uncorrected_end_index"])/(2*song_fs), song.max()*0.8, row["syb_name"])
     for _, row in labels2.iterrows():
         spectrogram_ax.axvline(row["start_index"]/song_fs, color="green")
         spectrogram_ax.axvline(row["end_index"]/song_fs, color="red")
-        spectrogram_ax.axvline(row["uncorrected_start_index"]/song_fs, color="lightgreen", linestyle=":")
-        spectrogram_ax.axvline(row["uncorrected_end_index"]/song_fs, color="pink", linestyle=":")
+        # spectrogram_ax.axvline(row["uncorrected_start_index"]/song_fs, color="lightgreen", linestyle=":")
+        # spectrogram_ax.axvline(row["uncorrected_end_index"]/song_fs, color="pink", linestyle=":")
         spectrogram_ax.axvline((row["subsybsongpos"] - int(song_fs/200))/song_fs, color="black", linestyle=":")
         spectrogram_ax.axvline((row["subsybsongpos"] + int(song_fs/200))/song_fs, color="black", linestyle=":")
 
