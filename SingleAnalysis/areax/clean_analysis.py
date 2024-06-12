@@ -146,7 +146,8 @@ accoustic_features["amp"] = song_dataset["amp"].sel(t=subsyllables["subsyllable_
 # print(accoustic_features)
 
 subsyllables["accoustic_features"] = accoustic_features.to_array(dim="accoustic")
-
+if subsyllables["accoustic_features"].isnull().any():
+    raise Exception("accoustic feat extract na pb")
 # print(subsyllables)
 
 # ============================================================================ #
@@ -229,11 +230,13 @@ for feat, target in [("accoustic", "neuro"), ("neuro", "accoustic")]:
             output_core_dims=[["subindex", target]],
             vectorize=True
         )
+        
         var_res= ((subsyllables[f"{prefix}predicted_{target}_features"] - subsyllables[f"{prefix}{target}_features"])**2).groupby("subsyllable_name").sum()
-        var_to_mean = ((subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name").mean() - subsyllables[f"{prefix}{target}_features"])**2).groupby("subsyllable_name").sum()
+        diff = ((subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name").mean() - subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"))**2)
+        var_to_mean = diff.groupby("subsyllable_name").sum()
         models_dataset[f"{prefix}{feat}2{target}_score"] = 1 - var_res / var_to_mean
 
-
+    models_dataset[f"{feat}2{target}_pvalue"] = (models_dataset[f"bootstrap_{feat}2{target}_score"] > models_dataset[f"{feat}2{target}_score"]).astype(float).mean("bootstrap")
 # ============================================================================ #
 # Finalizing
 # ============================================================================ #

@@ -54,10 +54,10 @@ def draw_neuro(ax: plt.Axes):
         
         if "_ifr" in v:
              m_ax = tx
-             neuro_dataset["ifr"].sel(neuron=v[:-4]).drop_vars(["neuro_fs"]).plot.line(ax=m_ax, color=f"C{i}", label=v, alpha=0.5)
+             neuro_dataset["ifr"].sel(neuron=v[:-4]).plot.line(ax=m_ax, color=f"C{i}", label=v, alpha=0.5)
         elif "_bua" in v:
           m_ax = ax
-          neuro_dataset["bua"].sel(sensor=v[:-4]).drop_vars(["neuro_fs"]).plot.line(ax=m_ax, color=f"C{i}", label=v, alpha=0.5)
+          neuro_dataset["bua"].sel(sensor=v[:-4]).plot.line(ax=m_ax, color=f"C{i}", label=v, alpha=0.5)
         m_ax.scatter(selected_subsyb["subsyllable_t"], selected_subsyb["neuro_features"].sel(neuro=v, lag=params["lag"]), label=f'{v}_lag{params["lag"]*1000}ms', color=f"C{i}", marker="+", zorder=10)
         m_ax.quiver(selected_subsyb["subsyllable_t"] - params["lag"], selected_subsyb["neuro_features"].sel(neuro=v, lag=params["lag"]), params["lag"], 0, zorder=5, color=f"C{i}", angles="xy", scale=1, scale_units="xy", width=0.002)
      ax.vlines(selected_subsyb["subsyllable_t"], ax.get_ylim()[0], ax.get_ylim()[1], color="black", linestyle=":", label=f'subsyllable{params["subsyllable_name"]}_t')
@@ -76,10 +76,38 @@ def draw_neuro_feat(ax: plt.Axes, k: int):
      df[feat] = df.pop("neuro_features")
      sns.histplot(df[[feat]], ax=ax, bins=20, kde=True)
 
+def draw_acoustic2neuro_model_score(ax: plt.Axes, k: int):
+     m= models_dataset.sel(lag = params["lag"], subsyllable_name=params["subsyllable_name"]).isel(neuro=k)
+     bt_df = m["bootstrap_accoustic2neuro_score"].to_dataframe().reset_index()
+     name = f'predicting_{models_dataset["neuro"].isel(neuro=k).item()}'
+     bt_df[name] = bt_df["bootstrap_accoustic2neuro_score"]
+     sns.histplot(bt_df[[name]], ax=ax, bins=20, kde=True)
+     ax.axvline(m["accoustic2neuro_score"].item(), color="red")
+     ax.text(m["accoustic2neuro_score"].item()*1.1, 0.5*ax.get_ylim()[0] + 0.5*ax.get_ylim()[1], m["accoustic2neuro_pvalue"].item())
+     ax.set_title("")
 
-f =  plt.figure(layout="tight")
+def draw_neuro2accoustic_model_score(ax: plt.Axes, k: int):
+     m= models_dataset.sel(lag = params["lag"], subsyllable_name=params["subsyllable_name"]).isel(accoustic=k)
+     bt_df = m["bootstrap_neuro2accoustic_score"].to_dataframe().reset_index()
+     name = f'predicting_{models_dataset["accoustic"].isel(accoustic=k).item()}'
+     bt_df[name] = bt_df["bootstrap_neuro2accoustic_score"]
+     sns.histplot(bt_df[[name]], ax=ax, bins=20, kde=True)
+     ax.axvline(m["neuro2accoustic_score"].item(), color="red")
+     ax.text(m["neuro2accoustic_score"].item()*1.1, 0.5*ax.get_ylim()[0] + 0.5*ax.get_ylim()[1], m["neuro2accoustic_pvalue"].item())
+     ax.set_title("")
+
+def draw_accoustic2neuro_recap(ax: plt.Axes, k: int):
+     df1 = models_dataset["accoustic2neuro_pvalue"].isel(neuro=k).to_dataframe().reset_index()
+     sns.scatterplot(df1, x="subsyllable_name", y="lag", hue="accoustic2neuro_pvalue", ax=ax, legend=False, hue_norm=(0, 1), palette="viridis")
+
+def draw_neuro2accoustic_recap(ax: plt.Axes, k: int):
+     df1 = models_dataset["neuro2accoustic_pvalue"].isel(accoustic=k).to_dataframe().reset_index()
+     sns.scatterplot(df1, x="subsyllable_name", y="lag", hue="neuro2accoustic_pvalue", ax=ax, legend=False, hue_norm=(0, 1), palette="viridis")
+
+f =  plt.figure(layout="constrained")
+f.suptitle(str(params))
 i=0
-grid = matplotlib.gridspec.GridSpec(6, 28, figure=f)
+grid = matplotlib.gridspec.GridSpec(10, 28, figure=f)
 # legend_ax = f.add_subplot(grid[:, slice(10,12)])
 song_ax: plt.Axes = f.add_subplot(grid[i, slice(0,24)])
 i+=1
@@ -98,8 +126,15 @@ i+=1
 neuro_feature_axs = [f.add_subplot(grid[i, slice(k*int(24/n_neuro),(k+1)*int(24/n_neuro))]) for k in range(n_neuro)]
 
 
+i+=1
+neuro2accoustic_model_axs = [f.add_subplot(grid[i, slice(k*int(24/n_acoustics),(k+1)*int(24/n_acoustics))]) for k in range(n_acoustics)]
+i+=1
+accoustic2neuro_model_axs = [f.add_subplot(grid[i, slice(k*int(24/n_neuro),(k+1)*int(24/n_neuro))]) for k in range(n_neuro)]
 
-
+i+=1
+neuro2accoustic_recap_axs = [f.add_subplot(grid[i, slice(k*int(24/n_acoustics),(k+1)*int(24/n_acoustics))]) for k in range(n_acoustics)]
+i+=1
+accoustic2neuro_recap_axs = [f.add_subplot(grid[i, slice(k*int(24/n_neuro),(k+1)*int(24/n_neuro))]) for k in range(n_neuro)]
 
 
 draw_raw_song(song_ax)
@@ -110,6 +145,16 @@ for k, ax in enumerate(accoustic_feature_axs):
      draw_accoustic_feat(ax, k)
 for k, ax in enumerate(neuro_feature_axs):
      draw_neuro_feat(ax, k)
+
+for k, ax in enumerate(neuro2accoustic_model_axs):
+     draw_neuro2accoustic_model_score(ax, k)
+for k, ax in enumerate(accoustic2neuro_model_axs):
+     draw_acoustic2neuro_model_score(ax, k)
+
+for k, ax in enumerate(neuro2accoustic_recap_axs):
+     draw_neuro2accoustic_recap(ax, k)
+for k, ax in enumerate(accoustic2neuro_recap_axs):
+     draw_accoustic2neuro_recap(ax, k)
 f.legend(bbox_to_anchor=(0.85, 0, 0.15, 1), loc="center")
 plt.show()
 # spectrogram_ax: plt.Axes = f.add_subplot(grid[1, :])
