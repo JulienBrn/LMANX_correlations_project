@@ -1,14 +1,20 @@
 from pathlib import Path
 import numpy as np, pandas as pd, xarray as xr
-import sklearn.preprocessing, sklearn.decomposition, sklearn.linear_model
+import sklearn.preprocessing, sklearn.decomposition, sklearn.linear_model, sklearn.pipeline, sklearn.metrics
 import tqdm.auto as tqdm
 import pickle, yaml, importlib
 import matplotlib.pyplot as plt, seaborn as sns, matplotlib
 from helper import singleglob, fastsearch, subarray_positions, get_param
-import logging, beautifullogger
+import logging, beautifullogger, warnings
+
+# from sklearn.exceptions import UndefinedMetricWarning
+# warnings.filterwarnings('ignore', category=UndefinedMetricWarning, append=True)
 
 logger=logging.getLogger(__name__)
 beautifullogger.setup(displayLevel=logging.WARNING)
+def filt(r):
+    return "UndefinedMetricWarning:" not in r.msg
+logging.getLogger("py.warnings").addFilter(filt)
 rd_generator = np.random.default_rng()
 
 session = Path("../Data/AreaXB602022-04-20_15-16-37")
@@ -202,6 +208,21 @@ if subsyllables["neuro_features"].isnull().any():
 
 models_dataset = xr.Dataset()
 
+models = {
+    "linreg": lambda: sklearn.linear_model.LinearRegression(),
+    "stdscaler + linreg" : lambda: sklearn.pipeline.Pipeline([("stdscaler", sklearn.preprocessing.StandardScaler()), ("linreg", sklearn.linear_model.LinearRegression())]),
+}
+
+scoring_methods = {
+    "r2": sklearn.metrics.r2_score,
+    "mean_squared_error" : sklearn.metrics.mean_squared_error,
+}
+
+models_dataset["model_name"] = xr.DataArray(list(models.keys()), dims="model_name")
+models_dataset["make_model"] = xr.DataArray(list(models.values()), dims="model_name")
+models_dataset["scoring_method"] = xr.DataArray(list(scoring_methods.keys()), dims="scoring_method")
+models_dataset["scoring_function"] = xr.DataArray(list(scoring_methods.values()), dims="scoring_method")
+
 subsyllables["bootstrap_indices"] = subsyllables.groupby("subsyllable_name").map(
     lambda d: xr.DataArray(rd_generator.integers(0, d.sizes["subindex"], size=(d.sizes["subindex"], get_param("n_bootstrap"))), dims=["subindex", "bootstrap"]))
 
@@ -209,17 +230,24 @@ subsyllables["bootstrap_accoustic_features"] = subsyllables.groupby("subsyllable
 subsyllables["bootstrap_neuro_features"] = subsyllables.groupby("subsyllable_name").map(lambda d: d["neuro_features"].isel(subindex = d["bootstrap_indices"]))
 
 
-def lin_fitmodel(f, t):
-    return sklearn.linear_model.LinearRegression().fit(f, t)
+
+def fitmodel(mm, f, t):
+    return mm().fit(f, t)
 
 def predict(m, f):
     return m.predict(f)
 
+def compute_score(score_f, ytrue, ypred):
+    r = score_f(ytrue, ypred, multioutput="raw_values")
+    if isinstance(r, float) and np.isnan(r):
+        return np.full(ytrue.shape[-1], np.nan)
+    return r
+
 for feat, target in [("accoustic", "neuro"), ("neuro", "accoustic")]:
     for prefix in ("", "bootstrap_"):
         models_dataset[f"{prefix}{feat}2{target}_model"] = xr.apply_ufunc(
-            lin_fitmodel, subsyllables[f"{feat}_features"].groupby("subsyllable_name"), subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"),
-            input_core_dims=[["subindex", feat]] + [["subindex", target]],
+            fitmodel, models_dataset["make_model"], subsyllables[f"{feat}_features"].groupby("subsyllable_name"), subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"),
+            input_core_dims=[[]] + [["subindex", feat]] + [["subindex", target]],
             output_core_dims=[[]],
             vectorize=True
         )
@@ -231,16 +259,27 @@ for feat, target in [("accoustic", "neuro"), ("neuro", "accoustic")]:
             vectorize=True
         )
         
-        var_res= ((subsyllables[f"{prefix}predicted_{target}_features"] - subsyllables[f"{prefix}{target}_features"])**2).groupby("subsyllable_name").sum()
-        diff = ((subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name").mean() - subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"))**2)
-        var_to_mean = diff.groupby("subsyllable_name").sum()
-        models_dataset[f"{prefix}{feat}2{target}_score"] = 1 - var_res / var_to_mean
+        # var_res= ((subsyllables[f"{prefix}predicted_{target}_features"] - subsyllables[f"{prefix}{target}_features"])**2).groupby("subsyllable_name").sum()
+        # diff = ((subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name").mean() - subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"))**2)
+        # var_to_mean = diff.groupby("subsyllable_name").sum()
+        # models_dataset[f"{prefix}{feat}2{target}_score"] = 1 - var_res / var_to_mean
+        models_dataset[f"{prefix}{feat}2{target}_score"] = xr.apply_ufunc(
+            compute_score, models_dataset["scoring_function"], subsyllables[f"{prefix}{target}_features"].groupby("subsyllable_name"), subsyllables[f"{prefix}predicted_{target}_features"].groupby("subsyllable_name"),
+            input_core_dims= [[]] + [["subindex", target]] + [["subindex", target]],
+            output_core_dims= [[target]],
+            vectorize=True,
+        )
 
     models_dataset[f"{feat}2{target}_pvalue"] = (models_dataset[f"bootstrap_{feat}2{target}_score"] > models_dataset[f"{feat}2{target}_score"]).astype(float).mean("bootstrap")
 # ============================================================================ #
 # Finalizing
 # ============================================================================ #
 
+
+models_dataset = models_dataset.drop_vars(["make_model", "scoring_function"])
+for feat, target in [("accoustic", "neuro"), ("neuro", "accoustic")]:
+    for prefix in ("", "bootstrap_"):
+        models_dataset = models_dataset.drop(f"{prefix}{feat}2{target}_model")
 
 print(models_dataset)
 

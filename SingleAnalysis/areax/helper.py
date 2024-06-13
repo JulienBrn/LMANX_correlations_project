@@ -1,4 +1,4 @@
-import numba
+import numba, xarray as xr
 from pathlib import Path
 
 @numba.jit(nopython=True)
@@ -68,3 +68,7 @@ def get_params_dict():
 
 def get_param(p: str):
     return get_params_dict()[p]
+
+
+# def apply_vectorized_func(f, *args, **kwargs): 
+#     xr.apply_ufunc()
